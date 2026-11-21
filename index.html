@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Campus Microgrid Controller — Live Demo</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171e26; --line: #26313d; --text: #e6edf3; --muted: #8b98a5;
+    --solar: #f5b82e; --battery: #3fb68b; --grid: #4c8dff; --gen: #e5534b; --price: #c792ea;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); line-height: 1.45; }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+  .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+  button { background: var(--grid); color: #fff; border: 0; border-radius: 8px; padding: 10px 18px;
+           font-size: 15px; font-weight: 600; cursor: pointer; }
+  button:hover { filter: brightness(1.1); }
+  .seed { color: var(--muted); font-size: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .stat .label { color: var(--muted); font-size: 13px; }
+  .stat .value { font-size: 26px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .good { color: var(--battery); } .bad { color: var(--gen); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 16px; margin: 0 0 10px; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+                         margin-right: 6px; background: var(--c); vertical-align: -1px; }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { fill: var(--muted); font-size: 11px; }
+  .tip { position: fixed; pointer-events: none; background: #0b0f14; border: 1px solid var(--line);
+         border-radius: 8px; padding: 8px 10px; font-size: 13px; display: none; z-index: 10; white-space: nowrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  th { color: var(--muted); font-weight: 600; }
+  .ev { font-size: 12px; padding: 2px 7px; border-radius: 99px; background: #26313d; }
+  .ev.grid_failure { background: #5c1f1c; } .ev.cloudy_weather { background: #3b3a2a; }
+  .ev.battery_failure { background: #1f3b31; } .ev.generator_failure { background: #3b2330; }
+  .strategy ol { margin: 0; padding-left: 20px; } .strategy li { margin-bottom: 6px; }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>⚡ Campus Microgrid Controller</h1>
+  <p class="sub">WEC Fall 2026 Programming. This page runs a simulated 24-hour day in your browser using the same strategy as our Python controller.</p>
+
+  <div class="controls">
+    <button id="run">▶ Run a new day</button>
+    <span class="seed" id="seedLabel"></span>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="label">Our total cost</div><div class="value" id="sCost">–</div></div>
+    <div class="stat"><div class="label">Naive cost (solar + grid only)</div><div class="value" id="sBase">–</div></div>
+    <div class="stat"><div class="label">Cost per unit vs naive (this day)</div><div class="value good" id="sSave">–</div></div>
+    <div class="stat"><div class="label">Demand met (ours vs naive)</div><div class="value" id="sUnmet">–</div></div>
+  </div>
+
+  <div class="card" id="longrun"></div>
+
+  <div class="card">
+    <h2>Where each hour's energy came from</h2>
+    <div class="legend">
+      <span style="--c:var(--solar)">Solar ($0)</span>
+      <span style="--c:var(--battery)">Battery</span>
+      <span style="--c:var(--grid)">Grid</span>
+      <span style="--c:var(--gen)">Unmet</span>
+    </div>
+    <svg id="mix" viewBox="0 0 1000 300"></svg>
+  </div>
+
+  <div class="card">
+    <h2>Battery level &amp; grid price</h2>
+    <div class="legend">
+      <span style="--c:var(--battery)">Battery stored (units, left axis)</span>
+      <span style="--c:var(--price)">Grid price ($/unit, right axis)</span>
+      <span style="--c:var(--muted)">Generator break-even $1.00</span>
+    </div>
+    <svg id="bat" viewBox="0 0 1000 240"></svg>
+  </div>
+
+  <div class="card strategy">
+    <h2>How the controller decides</h2>
+    <ol>
+      <li><b>Solar first.</b> It's free (up to 200 units/hour) and goes to every building except lecture halls, which can't take solar.</li>
+      <li><b>Battery next, lecture halls first.</b> The battery is spent only when it saves money: the grid costs more than $1, the grid has failed, or it's the last hour.</li>
+      <li><b>The grid covers the rest.</b></li>
+      <li><b>The generator ($1/unit) keeps the battery full</b> as grid-failure insurance. When the grid costs more than $1, we spend the battery and refill it, saving (price − $1) on every unit.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>Hour by hour</h2>
+    <div class="scroll"><table id="tbl"></table></div>
+  </div>
+</main>
+<div class="tip" id="tip"></div>
+
+<script>
+// ---------------------------------------------------------------- constants (mirror grid_optimizer.py)
+const HOURS = 24, SOLAR_CAP = 200, GEN_COST = 1, BAT_CAP = 100;
+const TYPES = ["library", "laboratory", "lecture_hall", "student_centre", "student_residence"];
+const NO_SOLAR = new Set(["lecture_hall"]);
+const EVENTS = Array(8).fill("none").concat(["cloudy_weather", "generator_failure", "battery_failure", "grid_failure"]);
+
+// ---------------------------------------------------------------- seeded random
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function makeDay(seed) {
+  const r = rng(seed), pick = a => a[Math.floor(r() * a.length)];
+  return Array.from({ length: HOURS }, () => ({
+    event: pick(EVENTS),
+    loads: TYPES.map(type => ({ type, load: 10 + Math.floor(r() * 71) })),
+    price: Math.round((0.4 + r() * 1.4) * 100) / 100,
+  }));
+}
+
+// ---------------------------------------------------------------- our controller (port of grid_optimizer.py)
+function allocate(loads, solarOk, batteryBudget, gridOk) {
+  const remaining = loads.map(l => l.load);
+  const alloc = loads.map(() => ({ solar: 0, battery: 0, grid: 0 }));
+  const give = (src, pool, idx) => {
+    for (const i of idx) {
+      const take = Math.min(remaining[i], pool);
+      alloc[i][src] += take; remaining[i] -= take; pool -= take;
+    }
+  };
+  const solarReady = [], noSolar = [];
+  loads.forEach((l, i) => (NO_SOLAR.has(l.type) ? noSolar : solarReady).push(i));
+  if (solarOk) give("solar", SOLAR_CAP, solarReady);
+  give("battery", batteryBudget, noSolar.concat(solarReady));
+  if (gridOk) give("grid", Infinity, loads.map((_, i) => i));
+  return { alloc, unmet: remaining.reduce((a, b) => a + b, 0) };
+}
+
+function runController(day) {
+  let battery = 0;
+  return day.map((h, hour) => {
+    const solarOk = h.event !== "cloudy_weather";
+    const batteryOk = h.event !== "battery_failure";
+    const gridOk = h.event !== "grid_failure";
+    const genOk = h.event !== "generator_failure" && batteryOk;
+    const hoursLeft = HOURS - hour - 1;
+    const reserve = BAT_CAP;
+
+    const stored = batteryOk ? battery : 0;
+    let budget = 0;
+    if (!gridOk || hoursLeft === 0) budget = stored;
+    else if (h.price > GEN_COST && genOk) budget = stored;
+    else if (h.price > GEN_COST) budget = Math.max(0, stored - reserve);
+
+    const { alloc, unmet } = allocate(h.loads, solarOk, budget, gridOk);
+    const sum = k => alloc.reduce((a, b) => a + b[k], 0);
+    const used = { solar: sum("solar"), battery: sum("battery"), grid: sum("grid") };
+    battery -= used.battery;
+
+    const gen = genOk && hoursLeft > 0 ? Math.max(0, Math.min(reserve, BAT_CAP) - battery) : 0;
+    battery += gen;
+    const cost = used.grid * h.price + gen * GEN_COST;
+    return { ...h, hour, ...used, gen, unmet, stored: battery, cost };
+  });
+}
+
+// Baseline: solar then grid, no battery or generator
+function runBaseline(day) {
+  return day.map(h => {
+    const { alloc, unmet } = allocate(h.loads, h.event !== "cloudy_weather", 0, h.event !== "grid_failure");
+    const grid = alloc.reduce((a, b) => a + b.grid, 0);
+    const load = h.loads.reduce((a, l) => a + l.load, 0);
+    return { cost: grid * h.price, unmet, delivered: load - unmet };
+  });
+}
+
+// ---------------------------------------------------------------- rendering
+const $ = id => document.getElementById(id);
+const money = x => "$" + x.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const tip = $("tip");
+function showTip(e, html) { tip.innerHTML = html; tip.style.display = "block";
+  tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 10) + "px"; tip.style.top = e.clientY + 14 + "px"; }
+function hideTip() { tip.style.display = "none"; }
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const ns = "http://www.w3.org/2000/svg";
+function el(tag, attrs, parent) { const n = document.createElementNS(ns, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]); parent && parent.appendChild(n); return n; }
+function niceMax(v) { const s = [50, 100, 150, 200, 250, 300, 400, 500]; return s.find(x => x >= v) || Math.ceil(v / 100) * 100; }
+
+function tipHtml(r) {
+  return `<b>Hour ${r.hour}</b> · ${r.event === "none" ? "no event" : r.event.replace("_", " ")}<br>
+    Solar ${r.solar} · Battery ${r.battery} · Grid ${r.grid}${r.unmet ? ` · <span class="bad">Unmet ${r.unmet}</span>` : ""}<br>
+    Grid price ${money(r.price)} · Generator ${r.gen}<br>Hour cost <b>${money(r.cost)}</b>`;
+}
+
+function drawMix(rows) {
+  const svg = $("mix"); svg.innerHTML = "";
+  const L = 44, R = 10, T = 10, B = 28, W = 1000 - L - R, H = 300 - T - B;
+  const max = niceMax(Math.max(...rows.map(r => r.solar + r.battery + r.grid + r.unmet)));
+  for (let i = 0; i <= 4; i++) {
+    const y = T + H - (H * i) / 4;
+    el("line", { x1: L, x2: L + W, y1: y, y2: y, stroke: css("--line") }, svg);
+    el("text", { x: L - 6, y: y + 4, "text-anchor": "end" }, svg).textContent = (max * i) / 4;
+  }
+  const bw = W / HOURS;
+  rows.forEach((r, i) => {
+    const x = L + i * bw + bw * 0.15, w = bw * 0.7;
+    let y = T + H;
+    for (const [k, c] of [["solar", "--solar"], ["battery", "--battery"], ["grid", "--grid"], ["unmet", "--gen"]]) {
+      const h = (r[k] / max) * H; if (!h) continue; y -= h;
+      el("rect", { x, y, width: w, height: h, fill: css(c), rx: 1.5 }, svg);
+    }
+    el("text", { x: L + i * bw + bw / 2, y: 300 - 10, "text-anchor": "middle" }, svg).textContent = i;
+    const hit = el("rect", { x: L + i * bw, y: T, width: bw, height: H, fill: "transparent" }, svg);
+    hit.addEventListener("mousemove", e => showTip(e, tipHtml(r))); hit.addEventListener("mouseleave", hideTip);
+  });
+}
+
+function drawBattery(rows) {
+  const svg = $("bat"); svg.innerHTML = "";
+  const L = 44, R = 44, T = 10, B = 28, W = 1000 - L - R, H = 240 - T - B;
+  const bw = W / HOURS, px = i => L + i * bw + bw / 2;
+  const yb = v => T + H - (v / BAT_CAP) * H, yp = v => T + H - (v / 2) * H;
+  for (let i = 0; i <= 4; i++) {
+    const y = T + H - (H * i) / 4;
+    el("line", { x1: L, x2: L + W, y1: y, y2: y, stroke: css("--line") }, svg);
+    el("text", { x: L - 6, y: y + 4, "text-anchor": "end" }, svg).textContent = (BAT_CAP * i) / 4;
+    el("text", { x: L + W + 6, y: y + 4 }, svg).textContent = "$" + ((2 * i) / 4).toFixed(1);
+  }
+  el("line", { x1: L, x2: L + W, y1: yp(1), y2: yp(1), stroke: css("--muted"), "stroke-dasharray": "5 4" }, svg);
+  rows.forEach((r, i) => {
+    if (r.event !== "none") el("rect", { x: L + i * bw, y: T, width: bw, height: H, fill: "#ffffff", opacity: 0.04 }, svg);
+    el("text", { x: px(i), y: 240 - 10, "text-anchor": "middle" }, svg).textContent = i;
+  });
+  const path = (f, c) => el("polyline", { points: rows.map((r, i) => `${px(i)},${f(r)}`).join(" "),
+    fill: "none", stroke: css(c), "stroke-width": 2.5, "stroke-linejoin": "round" }, svg);
+  path(r => yb(r.stored), "--battery"); path(r => yp(Math.min(r.price, 2)), "--price");
+  rows.forEach((r, i) => {
+    el("circle", { cx: px(i), cy: yb(r.stored), r: 3, fill: css("--battery") }, svg);
+    const hit = el("rect", { x: L + i * bw, y: T, width: bw, height: H, fill: "transparent" }, svg);
+    hit.addEventListener("mousemove", e => showTip(e, tipHtml(r) + `<br>Battery after hour: ${r.stored}`));
+    hit.addEventListener("mouseleave", hideTip);
+  });
+}
+
+function drawTable(rows) {
+  $("tbl").innerHTML = `<tr><th>Hour</th><th>Event</th><th>Price</th><th>Solar</th><th>Battery</th><th>Grid</th>
+    <th>Generator</th><th>Stored</th><th>Cost</th></tr>` + rows.map(r => `<tr>
+    <td>${r.hour}</td><td>${r.event === "none" ? "" : `<span class="ev ${r.event}">${r.event.replace("_", " ")}</span>`}</td>
+    <td>${money(r.price)}</td><td>${r.solar}</td><td>${r.battery}</td><td>${r.grid}</td><td>${r.gen}</td>
+    <td>${r.stored}</td><td>${money(r.cost)}${r.unmet ? ` <span class="bad">(${r.unmet} unmet)</span>` : ""}</td></tr>`).join("");
+}
+
+function run(seed) {
+  const day = makeDay(seed), rows = runController(day), base = runBaseline(day);
+  const total = rows.reduce((a, r) => a + r.cost, 0), baseTotal = base.reduce((a, r) => a + r.cost, 0);
+  const unmetHours = rows.filter(r => r.unmet > 0).length, baseUnmet = base.filter(r => r.unmet > 0).length;
+  $("seedLabel").textContent = `Day #${seed}`;
+  $("sCost").textContent = money(total);
+  $("sBase").innerHTML = money(baseTotal) + (baseUnmet ? ` <span style="font-size:15px;color:var(--gen)">${baseUnmet} hr unmet</span>` : "");
+  const delivered = rows.reduce((a, r) => a + r.solar + r.battery + r.grid, 0);
+  const baseDelivered = base.reduce((a, r) => a + r.delivered, 0);
+  const demand = delivered + rows.reduce((a, r) => a + r.unmet, 0);
+  const save = (1 - (total / delivered) / (baseTotal / baseDelivered)) * 100;
+  $("sSave").textContent = (save >= 0 ? "" : "−") + Math.abs(save).toFixed(1) + "%";
+  $("sSave").className = "value " + (save >= 0 ? "good" : "bad");
+  const pct = x => (100 * x / demand).toFixed(1) + "%";
+  $("sUnmet").innerHTML = `${pct(delivered)} <span style="font-size:15px;color:var(--muted)">vs ${pct(baseDelivered)}</span>`;
+  $("sUnmet").className = "value " + (unmetHours ? "bad" : "good");
+  drawMix(rows); drawBattery(rows); drawTable(rows);
+}
+
+function longRun(n) {
+  let ours = 0, naive = 0, oursOut = 0, naiveOut = 0;
+  for (let seed = 1; seed <= n; seed++) {
+    const d = makeDay(seed), r = runController(d), b = runBaseline(d);
+    ours += r.reduce((a, q) => a + q.cost, 0); naive += b.reduce((a, q) => a + q.cost, 0);
+    oursOut += r.filter(q => q.unmet > 0).length; naiveOut += b.filter(q => q.unmet > 0).length;
+  }
+  $("longrun").innerHTML = `<h2>Long run: ${n.toLocaleString()} simulated days</h2>
+    Our controller costs <b class="good">${((1 - ours / naive) * 100).toFixed(1)}% less</b> than naive solar + grid
+    (avg ${money(ours / n)} vs ${money(naive / n)} per day) <i>and</i> has
+    <b class="good">${(naiveOut / Math.max(1, oursOut)).toFixed(0)}× fewer hours with unmet demand</b>
+    (${oursOut.toLocaleString()} vs ${naiveOut.toLocaleString()}), because the battery keeps the lecture halls running during grid failures.
+    <span style="color:var(--muted)">The only unmet hours left are grid failures before the battery has had a chance to charge.</span>`;
+}
+longRun(1000);
+
+$("run").addEventListener("click", () => run(1 + Math.floor(Math.random() * 99999)));
+run(1);
+</script>
+</body>
+</html>
